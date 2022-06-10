@@ -1,0 +1,463 @@
+#!/bin/zsh
+
+_Args1="$1"
+_Args2="$2"
+_Args3="$3"
+
+_BindingUsername=""
+_BindingPassword=""
+_CrabAppleUsername=""
+_CrabApplePassword=""
+
+# Paths
+_BackupPath="wrkrm-images.linfield.edu/UserBackups/TimeMachine"
+_CrabApple="http://od.linfield.edu:8081/repository/CrabApple"
+_Domain="catnet.wfo.linfield.edu"
+_Worm="http://od.linfield.edu:8081/repository/deployChoco/Worm"
+
+_Processor=""
+_CrabAppleInfo=""
+_ComponentsPath="/Volumes/ITSData/CAW/ECS/Components"
+_FontColor="6"
+
+_ErrorCode1="Invalid command. Please Use \"worm help\" for user manual"
+_ErrorCode2="Invalid Username or Password"
+_ErrorCode3="Invalid input. The following component does not exist:"
+_Manual="Usage: Worm Deploy <Name>
+Usage: Worm Help
+Usage: Worm List [All(-a)] [Configurations(-c)] [Deployments(-d)] [Software(-s)]
+Usage: Worm Update
+
+  Deploy <Name>  Download and reference the contents of a named(case-sensitive)
+                 component. Requires root access privaleges.
+  Help           Manual of commands.
+  List [Option]  List available components on \"CrabApple\" by name. If no
+                 optional flag is given, Software will be listed as default
+                 output.
+  Update         Retrieve the latest version of \"Worm\" from \"CrabApple\".
+                 requires root access privaleges."
+
+function Main() {
+  # check what color font we should use
+  # sudo -u echo "$(defaults read -g AppleInterfaceStyle)"
+  # if [[ "$(defaults read -g AppleInterfaceStyle)" == "Dark" ]]; then
+  #   _FontColor="6"
+  # else
+  #   _FontColor="6"
+  # fi
+
+  # Check what command was called
+  case $_Args1 in
+    "" ) Help;;
+    [Bb]"ackup" || "-b" ) CheckAccess "Backup"
+                          pmset -a sleep 0 displaysleep 0
+                          Login "bind"
+                          Backup "$_BackupPath"
+                          pmset -a sleep 60 displaysleep 10;;
+    [Hh]"elp" || "-h" ) Help;;
+    [Dd]"eploy" || "-d" ) CheckAccess "Deploy"
+                          pmset -a sleep 0 displaysleep 0
+                          Login "crabApple"
+                          CheckProcessor
+                          mkdir -p "/private/tmp/Components"
+                          Deploy "$_Args2"
+                          rm -r "/private/tmp/Components"
+                          pmset -a sleep 60 displaysleep 10;;
+    [Ll]"ist" || "-l" ) List;;
+    [Tt]"est" || "-t" ) Test "$_Args2";;
+    [Uu]"pdate" || "-u" ) CheckAccess "Update"
+                          Update;;
+    * ) echo $_ErrorCode1;;
+  esac
+}
+
+#Production=====================================================================
+
+function Backup() {
+  echo "backup this machine to the following path: $1"
+  # echo "$_BindingUsername $_BindingPassword"
+  tmutil setdestination -a "smb://$_BindingUsername:$_BindingPassword@$1"
+  pathInfo=$(sudo tmutil destinationinfo)
+  id=$(echo $pathInfo | grep "ID " | sed "s/.*\: //")
+  echo "$pathInfo"
+  echo "$id"
+  sudo tmutil startbackup -b -d "$id"
+}
+
+function ConfigureGui() {
+  computerID=""
+  # computerName=""
+  # admins="N/A"
+
+  # Get computer ID
+  clear && echo "Please enter in the computer ID. Ex(mits0000st)"
+  echo -n "#? " && read computerID
+  # Get computer name
+  # clear && echo "Please enter in the computer Name. Ex(Jane Doe 0000)"
+  # echo -n "#? " && read computerName
+
+  # clear && echo "Enter the admin groups (separate with ",") or leave blank. "
+  # echo -n "#? " && read admins
+
+  clear && echo "Is the following correct?"
+           echo "ID: $computerID"
+           # echo "Name: $computerName"
+           # echo "Admins: $admins"
+  select ys in "---Exit---" "No" "Yes"; do
+    case $ys in
+      "" ) echo "Invalid input. Please enter an associated number for an option or press return/enter to display options";;
+      "---Exit---" ) return;;
+      "No" ) ConfigureGui; break;;
+      "Yes" ) Configure "$computerID"; break;;
+    esac
+  done
+}
+
+function Configure() {
+  Login "bind"
+  computerID="$1"
+  # computerName="$2"
+  # admins="$3"
+
+  # echo "computerID: $computerID"
+  # echo "computerName: $computerName"
+  # echo "admins: $admins"
+
+  # Bind to the domain, set admin groups, enable mobile accounts, etc...
+  dsconfigad -remove -username "$_BindingUsername" -password "$_BindingPassword"
+  dsconfigad -add "$_Domain" -username "$_BindingUsername" -password "$_BindingPassword" -computer "$computerID"
+  dsconfigad -nogroups -mobile "enable" -mobileconfirm "disable" -useuncpath "disable"
+  # if [[ $admins != "N/A" ||  $admins != "" ]]; then
+  #   sudo dsconfigad -groups "$admins"
+  # fi
+
+  # Set computer names
+  scutil --set HostName "$computerID"
+  scutil --set LocalHostName "$computerID"
+  scutil --set ComputerName "$computerID"
+
+  # Set remote login
+  systemsetup -setremotelogin on
+
+  # Set remote management
+  /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -activate -configure -allowAccessFor -specifiedUsers
+  /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart -configure -access -on -privs -all -users "support"
+}
+
+function Deploy() {
+  # Get the Json for all components and check if the requested component exists
+  Fetch
+  componentUrl=$(echo $_CrabAppleInfo | grep "downloadUrl" | grep "Components" | grep "/$1.txt" | sed "s/.* \"//" | sed "s/\".*//")
+  if [[ $1 == "" || $componentUrl == "" ]]; then
+    clear && echo "$_ErrorCode3 \"$1\"" && return
+  fi
+
+  # Pull the component down locally
+  echo "$(tput setaf $_FontColor)--------------------"
+  echo "URL: $componentUrl"
+  echo "Path: /private/tmp/Components/$1.txt"
+  echo "--------------------$(tput sgr0)"
+  curl -v -u $_CrabAppleUsername:$_CrabApplePassword "$componentUrl" -o "/private/tmp/Components/$1.txt"
+
+  # Read the contents of the retrieved component
+  echo "$(tput setaf $_FontColor)--------------------"
+  echo "Deploy $1:"
+  echo "Entities=$(sudo cat /private/tmp/Components/$1.txt | grep "Entities=" | sed "s/Entities=//")"
+  echo "AltDeploy=$(sudo cat /private/tmp/Components/$1.txt | grep "AltDeploy=" | sed "s/AltDeploy=//")"
+  echo "Components=$(sudo cat /private/tmp/Components/$1.txt | grep "Components=" | sed "s/Components=//")"
+  echo "PostDeploy=$(sudo cat /private/tmp/Components/$1.txt | grep "PostDeploy=" | sed "s/PostDeploy=//")"
+  echo "--------------------$(tput sgr0)"
+
+  # Place any listed entities locally on the machine for installation
+  if [[ "$(sudo cat /private/tmp/Components/$1.txt | grep "Entities=" | sed "s/Entities=//")" != "N/A" ]]; then
+    # Retrieve the Json from CrabApple and find all urls related to the given entity.
+    # Sort by the computer's current processor if needed.
+    Fetch
+    entityUrls=$(echo $_CrabAppleInfo | grep "downloadUrl" | grep "Entities" | grep "/$1/" | sed "s/.* \"//" | sed "s/\".*//") # pull the the Json lines for software groups from crabAppleInfo
+    if [[ $entityUrls == *"/Intel/"* || $entityUrls == *"/M1/"* ]]; then
+      entityUrls=$(echo $entityUrls | grep "$_Processor")
+    fi
+    entities="$(sudo cat /private/tmp/Components/$1.txt | grep "Entities=" | sed "s/Entities=//")"
+    entitiesArray=( "${(f)entities}" )
+    for entity in $entitiesArray; do # For every entity listed in the component
+      entityDownloadUrls=$(echo "$entityUrls" | grep "/$entity/")
+      entityDownloadUrlsArray=( "${(f)entityDownloadUrls}" )
+      for entityDownloadUrl in $entityDownloadUrlsArray; do # for every url related to the given entity
+        entityId=$(echo "$entityDownloadUrl" | sed "s/.*\///" | sed "s/\".*//")
+        echo "$(tput setaf $_FontColor)--------------------"
+        echo "Name: $entity"
+        echo "ID: $entityId"
+        echo "URL: $entityDownloadUrl"
+        echo "Entity Path: /private/tmp/Entities/$entity/$entityId"
+        echo "--------------------$(tput sgr0)"
+        mkdir -p "/private/tmp/Entities/$entity"
+        curl -v -u $_CrabAppleUsername:$_CrabApplePassword "$entityDownloadUrl" -o "/private/tmp/Entities/$entity/$entityId" #--output "/private/tmp/$pkgName/Scripts/postinstall.sh"
+      done
+    done
+  fi
+  # Perform alternate deploy if listed
+  if [[ "$(sudo cat /private/tmp/Components/$1.txt | grep "AltDeploy=" | sed "s/AltDeploy=//")" != "N/A" ]]; then
+    echo "$(tput setaf $_FontColor)--------------------"
+    echo "AltDeploy:"
+    echo "$(sudo cat /private/tmp/Components/$1.txt | grep "AltDeploy=" | sed "s/AltDeploy=//")"
+    echo "--------------------$(tput sgr0)"
+    eval "$(sudo cat /private/tmp/Components/$1.txt | grep "AltDeploy=" | sed "s/AltDeploy=//")"
+  fi
+  # Perform default install if there are local entities and if there was no alternate deploy
+  if [[ "$(sudo cat /private/tmp/Components/$1.txt | grep "Entities=" | sed "s/Entities=//")" != "N/A" && "$(sudo cat /private/tmp/Components/$1.txt | grep "AltDeploy" | sed "s/AltDeploy=//")" == "N/A" ]]; then
+    entities=$(sudo cat /private/tmp/Components/$1.txt | grep "Entities=" | sed "s/Entities=//")
+    componentEntitiesArray=( "${(f)entities}" )
+    for componentEntity in $componentEntitiesArray; do
+      for entity in "/private/tmp/Entities/$componentEntity"/*; do
+        Setup "$entity"
+      done
+    done
+    # rm -r "/private/tmp/Entities"
+  fi
+  # Place any listed components locally on the machine then deploy them
+  if [[ "$(sudo cat /private/tmp/Components/$1.txt | grep "Components=" | sed "s/Components=//")" != "N/A" ]]; then
+    components=$(sudo cat /private/tmp/Components/$1.txt | grep "Components=" | sed "s/Components=//")
+    componentList="$(echo $components | tr " " "\n")" # Replace all spaces with newlines(\n) then convert the string to an array with each element being a line
+    componentsArray=( "${(f)componentList}" )
+    for component in $componentsArray; do
+      Deploy $component
+    done
+  fi
+  # Perform post deploy if listed
+  if [[ "$(sudo cat /private/tmp/Components/$1.txt | grep "PostDeploy=" | sed "s/PostDeploy=//")" != "N/A" ]]; then
+    echo "$(tput setaf $_FontColor)--------------------"
+    echo "PostDeploy:"
+    echo "PostDeploy=$(sudo cat /private/tmp/Components/$1.txt | grep "PostDeploy=" | sed "s/PostDeploy=//")"
+    echo "--------------------$(tput sgr0)"
+    eval "$(sudo cat /private/tmp/Components/$1.txt | grep "PostDeploy=" | sed "s/PostDeploy=//")"
+  fi
+
+  # Cleanup
+  echo "$(tput setaf $_FontColor)--------------------"
+  echo "$1 has been deployed:"
+  echo "Entities=$(sudo cat /private/tmp/Components/$1.txt | grep "Entities=" | sed "s/Entities=//")"
+  echo "AltDeploy=$(sudo cat /private/tmp/Components/$1.txt | grep "AltDeploy=" | sed "s/AltDeploy=//")"
+  echo "Components=$(sudo cat /private/tmp/Components/$1.txt | grep "Components=" | sed "s/Components=//")"
+  echo "PostDeploy=$(sudo cat /private/tmp/Components/$1.txt | grep "PostDeploy=" | sed "s/PostDeploy=//")"
+  echo "--------------------$(tput sgr0)"
+  rm -r "/private/tmp/Entities"
+  # rm -r "/private/tmp/Components/$1.txt";
+}
+
+function CheckAccess() {
+  # test if root
+  if [[ $EUID -ne 0 ]]; then
+      echo "$(tput setaf $_FontColor)--------------------"
+      >&2 echo "$1 requires root user privileges, exiting..."
+      echo "--------------------$(tput sgr0)"
+      exit 1
+  fi
+
+  # continue with important things here
+  echo "$(tput setaf $_FontColor)--------------------"
+  echo "I am root"
+  echo "--------------------$(tput sgr0)"
+}
+
+function CheckProcessor() {
+  checkProcessor=$(sysctl -a | grep "brand_string")
+  if [[ $checkProcessor == *"Intel"* ]]; then
+    _CrabApple="http://od.linfield.edu:8081/repository/CrabApple/Intel"
+    _Processor="Intel"
+  else
+    _Processor="M1"
+    softwareupdate --install-rosetta --agree-to-license
+  fi
+}
+
+function Fetch() {
+  crabAppleInfoRaw=$(curl -X GET "http://od.linfield.edu:8081/service/rest/v1/search?repository=CrabApple&format=raw&sort=name&direction=asc") # everything after the first / and everything before the first "
+  continuationToken=$(echo $crabAppleInfoRaw | grep "continuationToken" | sed "s/.*: //" | sed "s/[\"]//g") # pull the the Json lines for software groups from crabAppleInfo
+  _CrabAppleInfo=$crabAppleInfoRaw
+  while [[ $continuationToken != "null" ]]; do
+    crabAppleInfoRaw=$(curl -X GET "http://od.linfield.edu:8081/service/rest/v1/search?sort=name&direction=asc&repository=CrabApple&format=raw&continuationToken=$continuationToken")
+    continuationToken=$(echo $crabAppleInfoRaw | grep "continuationToken" | sed "s/.*: //" | sed "s/[\"]//g") # pull the the Json lines for software groups from crabAppleInfo
+    _CrabAppleInfo="$_CrabAppleInfo $crabAppleInfoRaw"
+  done
+}
+
+function Help() {
+  if [[ "$_Args2" != "" ]]; then
+    echo "$_ErrorCode1"
+    return
+  fi
+  echo "$(tput setaf $_FontColor)--------------------"
+  echo "$_Manual"
+  echo "--------------------$(tput sgr0)"
+}
+
+function List() {
+  if [[ "$_Args3" != "" ]]; then
+    echo "$_ErrorCode1" && return
+  fi
+
+  Fetch
+  componentUrls=$(echo $_CrabAppleInfo | grep "downloadUrl" | grep "Components" | sed "s/.*: //" | sed "s/[\"]//g")
+  componentDeployments=$(echo $componentUrls | grep "/Deployments/" | sed "s/.*\///" | sed "s/.txt.*//");
+  componentConfigurations=$(echo $componentUrls | grep "/Configurations/" | sed "s/.*\///" | sed "s/.txt.*//");
+  componentSoftware=$(echo $componentUrls | grep "/Software/" | sed "s/.*\///" | sed "s/.txt.*//");
+  case $_Args2 in
+    [Ss]"oftware" || "-"[Ss] || "" ) echo "$(tput setaf $_FontColor)--------------------";
+                         echo "Software:";
+                         echo "$componentSoftware";
+                         echo "--------------------$(tput sgr0)";;
+    [Aa]"ll" || "-"[Aa] ) echo "$(tput setaf $_FontColor)--------------------";
+                     echo "Deployments:";
+                     echo "$componentDeployments";
+                     echo "--------------------$(tput sgr0)";
+                     echo "$(tput setaf $_FontColor)--------------------";
+                     echo "Configurations:";
+                     echo "$componentConfigurations";
+                     echo "--------------------$(tput sgr0)";
+                     echo "$(tput setaf $_FontColor)--------------------";
+                     echo "Software:";
+                     echo "$componentSoftware";
+                     echo "--------------------$(tput sgr0)";;
+    [Dd]"eployments" || "-"[Dd] ) echo "$(tput setaf $_FontColor)--------------------";
+                       echo "Deployments:";
+                       echo "$componentDeployments";
+                       echo "--------------------$(tput sgr0)";;
+    [Cc]"onfigurations" || "-"[Cc] ) echo "$(tput setaf $_FontColor)--------------------";
+                          echo "Configurations:";
+                          echo "$componentConfigurations";
+                          echo "--------------------$(tput sgr0)";;
+    * ) echo "$_ErrorCode1"; return;;
+  esac
+}
+
+function Login() {
+  if [[ "$1" == "configure" || "$1" == "image" || "$1" == "bind" ]]; then
+    clear && echo "Please enter a username with permission to bind this machine"
+    echo -n "#? " && read _BindingUsername
+    clear && echo "Please enter your binding password"
+    echo -n "#? " && read -s _BindingPassword
+  fi
+  if [[ "$1" == "crabApple" ]]; then
+    clear && echo "Please enter a username with permission to access CrabApple"
+    echo -n "#? " && read _CrabAppleUsername
+    clear && echo "Please enter your CrabApple password"
+    echo -n "#? " && read -s _CrabApplePassword
+
+    # Check if the credentials are valid
+    crabAppleHealthInfo=$(curl -u $_CrabAppleUsername:$_CrabApplePassword -X GET "http://od.linfield.edu:8081/service/rest/v1/status/check" -H "accept: application/json") # everything after the first / and everything before the first "
+    # echo "Hi: $crabAppleHealthInfo"
+    if [[ $crabAppleHealthInfo == "" ]]; then
+      clear && echo $_ErrorCode2
+      exit 1
+    fi
+  fi
+  clear
+}
+
+function Setup() {
+  echo "$(tput setaf $_FontColor)--------------------"
+  echo "Evaluate the following: $1"
+  echo "--------------------$(tput sgr0)"
+
+  case $1 in
+    *".app" ) cp -R "$1" "/Applications"
+              chmod -R 777 "/Applications/$(echo $1 | sed "s/.*\///")";;
+    *".cer" ) security add-trusted-cert -d -r trustAsRoot -k "/Library/Keychains/System.keychain" "$1";;
+    *".dmg" ) drive=$(sudo hdiutil attach "$1" | grep Volumes | cut -f 3) # Mount and grab the directory
+              for item in $drive/*; do
+                Setup "$item"
+              done
+              hdiutil detach "$drive";;
+    *".jar" ) cp -R "$1" "/Applications";;
+    *".mobileconfig" ) cp "$1" "/Users/support/Desktop";;
+    *".pkg" ) /usr/sbin/installer -dumplog -verboseR -pkg "$1" -target /;;
+    *".zip" ) mkdir -p "$(echo $1 | sed "s/\/[^\/]*$//")/Unzipped"
+              unzip "$1" -d "$(echo $1 | sed "s/\/[^\/]*$//")/Unzipped"
+              for item in "$(echo $1 | sed "s/\/[^\/]*$//")/Unzipped"/*; do
+                Setup "$item"
+              done
+              # rm -r "$(echo $1 | sed "s/\/[^\/]*$//")/Unzipped";;
+  esac
+}
+
+function Update() {
+  curl -v $_Worm -o "/usr/local/bin/Worm"
+  chmod +x "/usr/local/bin/Worm"
+}
+
+#Experimental===================================================================
+
+# function Install() {
+#   echo "$(tput setaf $_FontColor)--------------------"
+#   echo "Install the following: $1"
+#   echo "--------------------$(tput sgr0)"
+#
+#   if [[ $1 == *".pkg"* ]]; then # If a package
+#     /usr/sbin/installer -dumplog -verboseR -pkg "$1" -target /
+#   elif [[ $1 == *".dmg"* ]]; then # If a dmg
+#     drive=$(sudo hdiutil attach "$1" | grep Volumes | cut -f 3) # Mount and grab the directory
+#     for item in $drive/*; do
+#       Install "$item"
+#     done
+#     hdiutil detach "$drive"
+#   elif [[ $1 == *".app"* ]]; then # If app
+#     appId=$(echo $1 | sed "s/.*\///")
+#     cp -R "$1" "/Applications"
+#     chmod -R 777 "/Applications/$appId"
+#   elif [[ $1 == *".mobileconfig"* ]]; then # If a config file
+#     cp "$1" "/Users/support/Desktop"
+#   elif [[ $1 == *".cer"* ]]; then # If a cerificate
+#     security add-trusted-cert -d -r trustAsRoot -k "/Library/Keychains/System.keychain" "$1"
+#   elif [[ $1 == *".jar"* ]]; then
+#     cp -R "$1" "/Applications"
+#   fi
+# }
+
+
+
+
+function Test() {
+  # osascript -e 'tell application "Terminal"' ¬ 'get background color of selected tab of window 1' ¬ 'end tell'
+  # osascript -e 'get background color of selected tab of window 1'
+      # get background color of selected tab of window 1
+    # end tellosascript ss6
+  echo "Hello World!"
+}
+
+function Upload() {
+  if [[ -d "/Users/support/Desktop/CrabAppleUpload" ]]; then
+    Login "upload"
+    echo "Exists!"
+
+    for item in "/Users/support/Desktop/NexusUpload"/*; do # For each item in the given directory
+      entitiesArray+=("${item##*/}")
+      # echo "${item##*/}"
+    done
+
+    # Get the type of image
+    clear && echo "What software would you like to upload?"
+    select item in "---Exit---" "All" ${entitiesArray[@]}; do
+      case $item in
+        "" ) echo "Invalid input. Please try again";;
+        "---Exit---" ) return;;
+        "All" ) for item in $entitiesArray; do # For each item in the given directory
+                  sudo curl -v -u $_CrabAppleUsername:$_CrabApplePassword --upload-file "/Users/support/Desktop/NexusUpload/$item" "$_CrabApple/$pkgName/$pkgID.pkg";
+                done;
+                break;;
+        "${entitiesArray[${entitiesArray[(ie)$item]}]}" ) sudo curl -v -u $_CrabAppleUsername:$_CrabApplePassword --upload-file "/Users/support/Desktop/NexusUpload/$item" "$_CrabApple/$pkgName/$pkgID.pkg"; break;;
+      esac
+    done
+  else
+    clear && echo "\"CrabAppleUpload\" doesn't currently exist on your desktop. Would you like it to be created for you?"
+    select ys in "No" "Yes"; do
+      case $ys in
+        "" ) echo "Invalid input. Please enter an associated number for an option or press return/enter to display options";;
+        "No" ) return;;
+        "Yes" ) sudo mkdir -p "/Users/support/Desktop/CrabAppleUpload"; echo "Please place the software you would like to upload in the \"CrabAppleUpload\" folder located on you desktop"; break;;
+      esac
+    done
+  fi
+}
+
+Main
+exit 0
